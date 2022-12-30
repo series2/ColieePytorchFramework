@@ -27,7 +27,7 @@ def controller(train_file_path:str,arch:str,
         loop_time:int=1,use_model_iter:bool=False,model_remove:bool=False,
         pretrained_model_name_or_path:str="cl-tohoku/bert-base-japanese-whole-word-masking",
         test_path:str=None,aug_path:str=None,
-        batch_size:int=None,epochs:int=5,max_len:int=None,lr:float=1e-5,
+        batch_size:int=None,epochs:int=None,max_len:int=None,lr:float=1e-5,
         without_neptune=False,neptune_instance=None,neptune_init_tags=[],
         jlbert_token:str=None,debug:bool=False,logger=None,**args): # argsにはモデル固有のパラメタを入れる。
         ## argsの中身　use_in_model_da_times, (CELossWeight,PairLossWeight,SentLossWeight)
@@ -44,7 +44,7 @@ def controller(train_file_path:str,arch:str,
         epochs=2
     
     if epochs==None:
-        epochs=5 if arch!="MSCL" else 5
+        epochs=5 if arch!="MSCL" else 10
         if arch=="MSCL":
             logger.warning("epoch may be better if set to more than 5.") # TODO MSCLはもう少しepoch増やすべき?
     if max_len==None:
@@ -246,8 +246,10 @@ def train(train_file_path:str,output_dir:str,arch:str,
             x_feature,y_feature=convert_examples_to_multi_bert_features(x_test,y_test,max_seq_length=max_len,tokenizer=tokenizer)
             data=SimpleDataset(x_feature,y_feature)
             test_dataloader=DataLoader(data,batch_size,shuffle=False)
-        use_da_times=args["use_in_model_da_times"]
-        model=MSCL(pretrained_model_name_or_path,logger=logger,jlbert_token=jlbert_token,is_ph_same_instance=True,use_da_times=use_da_times,tau=0.08).to(device)
+        use_da_times=args["use_in_model_da_times"] # 必須
+        ce_use_emb=args.get("ce_use_embs",False)
+        sent_only_use_cls=args.get("sent_only_use_cls",False)
+        model=MSCL(pretrained_model_name_or_path,logger=logger,jlbert_token=jlbert_token,is_ph_same_instance=True,use_da_times=use_da_times,tau=0.08,ce_use_emb=False,sent_only_use_cls=False).to(device)
         optimizer=torch.optim.Adam(model.parameters(), lr=lr) # , betas=(1-beta1,1-beta2),eps=eps,weight_decay=decay
         def accuracy(logits:torch.Tensor,gold:torch.Tensor):
             b=len(gold) # logits (b*? , 2)
@@ -292,7 +294,7 @@ def train(train_file_path:str,output_dir:str,arch:str,
         raise Exception(f"not implemented arch {arch}")
 
 
-    model.fit(train_dataloader,valid_dataloader,epochs=epochs,output_dir=output_dir,nep=nep,
+    monitor_loss=model.fit(train_dataloader,valid_dataloader,epochs=epochs,output_dir=output_dir,nep=nep,
                     save_monitor="CE",device=device,nep_base_namespace=nep_base_namespace)
 
     model.load_weights(os.path.join(output_dir,"model.pth")) #  'BERT_Task4.h5'
@@ -306,7 +308,8 @@ def train(train_file_path:str,output_dir:str,arch:str,
     del model  #明示的に解放(GPU　メモリー どんどん貯まる) plain_tohoku-bert_NA/DABaseは問題なかったが、MSCLがダメ。
     torch.cuda.empty_cache()
 
-    
+    return monitor_loss
+
 
 """
     cd train_script

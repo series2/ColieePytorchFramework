@@ -88,7 +88,7 @@ class PlainBert(TrainingModelBase):
         return {"CE":out.logits}
 
 class MSCL(TrainingModelBase):
-    def __init__(self,pretrained_model_name_or_path,logger:Logger=None,jlbert_token=None,is_ph_same_instance=True,use_da_times=1,tau=0.08):
+    def __init__(self,pretrained_model_name_or_path,logger:Logger=None,jlbert_token=None,is_ph_same_instance=True,use_da_times=1,tau=0.08,ce_use_emb=False,sent_only_use_cls=False):
         super().__init__(logger=logger)
         self.bert_config=BertConfig.from_pretrained(pretrained_model_name_or_path,
                                                     gradient=True,
@@ -105,13 +105,16 @@ class MSCL(TrainingModelBase):
         self.ff = nn.Sequential(
             nn.Linear(4*self.bert_config.hidden_size, self.bert_config.hidden_size),
             nn.ReLU())
-        self.classifier = nn.Linear(4*self.bert_config.hidden_size, 2)
+        self.classifier = nn.Linear(4*self.bert_config.hidden_size, 2) if not ce_use_emb else nn.Linear(4*self.bert_config.hidden_size + 2 * self.bert_config.hidden_size, 2)
         self.use_da_times=use_da_times
         self.tau=tau
         assert tau!=0
 
         self.ce=nn.CrossEntropyLoss()
         self.cos_sim = nn.CosineSimilarity(dim=-1)
+
+        self.ce_use_emb=ce_use_emb
+        self.sent_only_use_cls=sent_only_use_cls
 
         self.logger.warning("Loss CE loss is applyed to Augmentated Data, So Consider Appropreate Epoch or change CE Loss for apply to only one data. ")
         self.logger.warning("SCL_Pair_Loss use dot_similarity (instead of cosine similarity)")
@@ -165,13 +168,16 @@ class MSCL(TrainingModelBase):
             assert sp_mean.shape==(b,d) and sp_max.shape==(b,d) and sh_mean.shape==(b,d) and sh_max.shape==(b,d)
 
             # (b,d) -> (b,4*d)
-            Z = torch.cat([sp_mean,sp_max,sh_mean,sh_max],dim=-1)
+            Z = torch.cat([sp_mean,sp_max,sh_mean,sh_max],dim=-1) if not self.ce_use_emb else torch.cat([sp_mean,sp_max,sh_mean,sh_max,encoded_p[:,0,:],encoded_h[:,0,:]],dim=-1)
             assert Z.shape==(b,4*d)
 
             # (b,4*d) -> (b,2)
             logits=self.classifier(Z)
             assert logits.shape==(b,2)
-            sent=torch.cat([encoded_p,encoded_h],dim=1) # batch方向は伸ばすので。 (b,2*l,d)
+            if not self.sent_only_use_cls:
+                sent=torch.cat([encoded_p,encoded_h],dim=1) # token方向は伸ばすので。 (b,2*l,d) 
+            else:
+                sent=torch.cat([encoded_p[:,0:1,:],encoded_h[:,0:1,:]],dim=1) # token方向は伸ばすので。 (b,2,d) 
 
             return {"CE":logits,"Pair":Z,"Sent":sent}
         res={"CE":[],"Pair":[],"Sent":[]}
@@ -286,8 +292,8 @@ class MSCL(TrainingModelBase):
 
         poss_rate=poss/pos_n if pos_n>0 else torch.zeros_like(pos_n)
         negs_rate=negs/neg_n if neg_n>0 else torch.zeros_like(neg_n)
-        temp=(poss_rate - negs_rate) - margin # poss_rate-negs_rateを(marginより)大きくしたい。 つまり、tempは0を目指して大きくしたい。逆に言うと、-tempは0を目指して小さくしたい。# poss_rate=0.5,neg_rate=-0.5
-        loss= max( -temp , torch.zeros_like(temp) ) # torch.zeros_like ... device ,dtypeも揃える。想定は size []
+        temp=margin-(poss_rate - negs_rate) # poss_rate-negs_rateを(marginより)大きくしたい。 つまり、tempは0を目指して大きくしたい。逆に言うと、-tempは0を目指して小さくしたい。# poss_rate=0.5,neg_rate=-0.5
+        loss= max( temp , torch.zeros_like(temp) ) # torch.zeros_like ... device ,dtypeも揃える。想定は size []
         # lossは 0を下らない。また、2+margin 以上にはならない。
         self.logger.debug(f"Sent_loss:{loss} , temp:{temp} , poss:{poss_rate}({poss}/{pos_n} , neg:{negs_rate}({negs}/{neg_n})")
         assert not torch.isnan(loss).any()

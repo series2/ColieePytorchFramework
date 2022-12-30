@@ -44,6 +44,7 @@ class TrainingModelBase(nn.Module):
             epoch などは 0スタートであり、保存したモデルを途中から始めることを想定しない。そのためsave_monitorも初期値は-inf,infなどである。
             dataloaderは辞書のx{feature1:torch.tensor([data1,data2,...],feature2:torch.tensor([data1,data2,..]))}と、
             配列のy torch.tensor([label1,label2,....])で構成される。
+            return は monitor_loss(epochごとのvalid_lossらの中での最小値)
         """
         self.logger.warning("Do Implement for TQDM all loss")
         # self.nep=nep
@@ -190,6 +191,8 @@ class TrainingModelBase(nn.Module):
                 nep[os.path.join(nep_base_namespace,"fit_params/loss_weights",key)]=value
         self.logger.info("End model.fit()")
         # self.steps=0
+
+        return monitor_loss
     
     def load_weights(self,path):
         # self.load_state_dict(torch.load(path,map_location=torch.device("cpu")))

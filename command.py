@@ -112,6 +112,8 @@ def do_experiment_all_year_from_shell(write_only=False):
     argparser.add_argument('--ce_loss_weight',type=float,default=None)
     argparser.add_argument('--pair_loss_weight',type=float,default=None)
     argparser.add_argument('--sent_loss_weight',type=float,default=None)
+    argparser.add_argument('--ce_use_emb',action="store_true") # デフォルトはFalse
+    argparser.add_argument('--sent_only_use_cls',action="store_true") # デフォルトはFalse
 
     args=argparser.parse_args()
     args=vars(args) # args を辞書に変換
@@ -182,8 +184,10 @@ def experiment_all_year(write_only,base_dir,meta_name,architecture,model_path,au
             "pretrained_model_name_or_path":model_path,
             "test_path":test_path,"aug_path": None if not augmentation_flag else os.path.join(AUGMENTATION_FILE_PATH),
             "without_neptune":without_neptune,"neptune_instance":nep,"neptune_init_tags":[],
-            "jlbert_token":None,"debug":debug,"logger":logger,"args":**args
+            "jlbert_token":None,"debug":debug,"logger":logger
         }
+        for key in args:
+            controller_args[key]=args[key]
         if not write_only:
             controller(**controller_args)
             # controller(train_file_path=train_path,arch=architecture,
