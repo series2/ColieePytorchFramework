@@ -13,8 +13,9 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score
 
-from models import PlainBert,MSCL,SimpleDataset
+from models import PlainBert,MSCL,DACL,SimpleDataset,TextDataset
 from utils import load_dataset,create_logger,create_neptune_run_instance
+import neptune.new as neptune
 from get_controller_args import get_controller_args,str2dict_args_from_sh
 from preprocessing import convert_examples_to_features,convert_examples_to_multi_bert_features
 
@@ -28,8 +29,8 @@ def controller(train_file_path:str,arch:str,
         pretrained_model_name_or_path:str="cl-tohoku/bert-base-japanese-whole-word-masking",
         test_path:str=None,aug_path:str=None,
         batch_size:int=None,epochs:int=None,max_len:int=None,lr:float=1e-5,
-        without_neptune=False,neptune_instance=None,neptune_init_tags=[],
-        jlbert_token:str=None,debug:bool=False,logger=None,**args): # argsにはモデル固有のパラメタを入れる。
+        without_neptune=False,neptune_instance=None,neptune_init_tags=[],reuse_nep=False, #reuse_nep ... idがあれば使う。
+        jlbert_token:str=None,debug:bool=False,logger=None,reset=False,**args): # argsにはモデル固有のパラメタを入れる。
         ## argsの中身　use_in_model_da_times, (CELossWeight,PairLossWeight,SentLossWeight)
     """ 
     ある一年分の学習を1回または複数回回す。(loop_time)
@@ -41,22 +42,24 @@ def controller(train_file_path:str,arch:str,
     if logger==None:
         logger=create_logger("controller")
     if debug:
-        epochs=2
-    
-    if epochs==None:
-        epochs=5 if arch!="MSCL" else 10
-        if arch=="MSCL":
-            logger.warning("epoch may be better if set to more than 5.") # TODO MSCLはもう少しepoch増やすべき?
-    if max_len==None:
-        max_len=512 if arch=="plain" else 256 # else ... double,MSCL,DACL
-        if arch=="MSCL":
-            max_len=256 # max_lenはMSCLではメモリ使用量には関係ありそう。TODO
-        logger.info(f"max_len is automatically setted to {max_len} in model {arch}")
+        epcohs=5
+        # epochs=2
     
     if batch_size==None:
         batch_size=12 if arch!="MSCL" else 12
         # batch_sizeはMSCLではメモリ使用量には関係なさそう。
         logger.info(f" is automatically setted to {batch_size} in model {arch}")
+
+    if epochs==None:
+        epochs=5 if arch!="MSCL" else 10
+        if arch=="MSCL":
+            logger.warning("epoch may be better if set to more than 5.") # TODO MSCLはもう少しepoch増やすべき?
+    
+    if max_len==None:
+        max_len=512 if arch=="plain" or arch=="DACL" else 256 # else ... double,MSCL,DACL
+        if arch=="MSCL":
+            max_len=256 # max_lenはMSCLではメモリ使用量には関係ありそう。TODO
+        logger.info(f"max_len is automatically setted to {max_len} in model {arch}")
 
     if arch!="plain":
         logger.warning(f"learning rate({lr}) may be not good. in model {arch}") # TODO
@@ -68,16 +71,6 @@ def controller(train_file_path:str,arch:str,
         logger.debug(f"\n\n{'-'*10}debug mode{'-'*10}\n\n")
     # os.mkdir(os.path.join(base_dir,name)) # 存在していた場合error
     os.makedirs(os.path.join(base_dir,name),exist_ok=True)
-    # if arch=="MSCL":
-    #     params["use_da"]=args["use_in_model_da_times"] # TODO
-    #     params["CELossWeight"]=1.0
-    #     params["PairLossWeight"]=0.8
-    #     params["SentLossWeight"]=0.05
-    # if arch=="DACL":
-    #     params["use_da"]=False # TODO
-    #     params["use_cl"]=False
-    #     params["CELossWeight"]=1.0
-    #     params["CLLossWeight"]=1.0
 
     nep_create_flag=False
     if without_neptune:
@@ -85,13 +78,35 @@ def controller(train_file_path:str,arch:str,
     else:
         if neptune_instance==None:
             nep_create_flag=True
-            tags=[name]
-            # if "tags" in args.keys():
-                # tags.extend(args["tags"])
-            tags.extend(neptune_init_tags)
-            if debug:
-                tags.append("Debug")
-            neptune_instance=create_neptune_run_instance(name=name,tags=tags)
+            nep_file=os.path.join(base_dir,"nep_id.txt")
+            if reuse_nep:
+                if os.path.isfile(nep_file):
+                    with open(nep_file,"r") as f:
+                        nep_id=f.read()
+                        nep_id=nep_id.rstrip()
+                    logger.info(f"use nep_id ... {nep_id}")
+                    logger.warning("reuse nep instance. but have not used the 'create_neptune_run_instance'. so you cannot use wrapped neptune.")
+                    from dotenv import load_dotenv
+                    load_dotenv(override=True)
+                    neptune_instance = neptune.init_run(with_id=nep_id,
+                        project=os.getenv('NEPTUNE_PROJECT'),
+                        api_token=os.getenv('NEPTUNE_API_TOKEN'))
+                else:
+                    tags=[]
+                    tags.extend(neptune_init_tags)
+                    if debug:
+                        tags.append("Debug")
+                    neptune_instance=create_neptune_run_instance(name=base_dir,tags=tags)
+                    with open(nep_file,"w") as f:
+                        f.write(neptune_instance["sys/id"].fetch())
+            else:
+                tags=[name]
+                # if "tags" in args.keys():
+                    # tags.extend(args["tags"])
+                tags.extend(neptune_init_tags)
+                if debug:
+                    tags.append("Debug")
+                neptune_instance=create_neptune_run_instance(name=name,tags=tags)
         params={
                 "train_file_path":train_file_path,
                 "arch":arch,
@@ -111,6 +126,7 @@ def controller(train_file_path:str,arch:str,
                 "jlbert_token":(jlbert_token!=None),
                 "debug":"debug",
                 "Optimizer":"Adam",
+                "reset":reset,
             }
         params.update(args) # 辞書型 argを追加する
         neptune_instance[os.path.join(name,"parameters")] = params
@@ -126,7 +142,9 @@ def controller(train_file_path:str,arch:str,
             test_path=test_path,aug_path=aug_path,
             batch_size=batch_size,epochs=epochs,max_len=max_len,lr=lr,
             nep=neptune_instance,nep_base_namespace=nep_base_namespace,
-            jlbert_token=jlbert_token,debug=debug,logger=logger,**args)
+            jlbert_token=jlbert_token,debug=debug,logger=logger,reset=reset,**args)
+        if model_remove:
+                os.remove(os.path.join(output_dir,"model.pth"))
     else:
         for i in range(1,loop_time+1):
             output_dir=os.path.join(base_dir,name,str(i))
@@ -139,7 +157,7 @@ def controller(train_file_path:str,arch:str,
                 test_path=test_path,aug_path=aug_path,
                 batch_size=batch_size,epochs=epochs,max_len=max_len,lr=lr,
                 nep=neptune_instance,nep_base_namespace=nep_base_namespace,
-                jlbert_token=jlbert_token,debug=debug,logger=logger,**args)
+                jlbert_token=jlbert_token,debug=debug,logger=logger,reset=reset,**args)
             if model_remove:
                 os.remove(os.path.join(output_dir,"model.pth"))
     if nep_create_flag:
@@ -149,10 +167,10 @@ def controller(train_file_path:str,arch:str,
 # 1回の学習。
 def train(train_file_path:str,output_dir:str,arch:str,
         pretrained_model_name_or_path:str="cl-tohoku/bert-base-japanese-whole-word-masking",
-        test_path=None,aug_path=None,
+        test_path=None,aug_path=None,valid_path=None,# validは与えなければtrainから分割される
         batch_size:int=12,epochs:int=5,max_len:int=256,lr:float=1e-5,
         nep=None,nep_base_namespace=None,
-        jlbert_token=None,debug=False,logger=None,seed=None,**args):
+        jlbert_token=None,debug=False,logger=None,seed=None,reset=False,**args):
     if logger==None:
         logger=create_logger("train_one_time")
     support_arch=["plain","double","MSCL","DACL"]
@@ -179,7 +197,12 @@ def train(train_file_path:str,output_dir:str,arch:str,
         nep[os.path.join(nep_base_namespace,"run_seed")]=seed
 
     x_train, y_train = load_dataset(train_file_path,debug)  # 訓練データをロード
-    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.1, random_state=random.randint(0, 2**31 - 1))
+
+    if valid_path==None:
+        x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.1, random_state=random.randint(0, 2**31 - 1))
+    else:
+        x_val,y_val=load_dataset(valid_path,debug)
+
     if aug_path:
         x_art, y_art = load_dataset(aug_path,debug)  # 拡張データをロード
         x_train.extend(x_art)
@@ -198,9 +221,6 @@ def train(train_file_path:str,output_dir:str,arch:str,
                 res_line = " ".join(morphemes) 
                 return res_line
         jlbert_tokenizer = JumanppTokenizer()# 単語を分けるtokenizer
-
-
-
     # モデルをビルド
     tokenizer = BertJapaneseTokenizer.from_pretrained(pretrained_model_name_or_path) # TODO JLBERT
     # 必ずLoss "CE" の名前でモデルを定義しておくこと。
@@ -230,6 +250,7 @@ def train(train_file_path:str,output_dir:str,arch:str,
     elif arch=="MSCL":
         # raise Exception(f"not implemented arch {arch} check when use_in_model_da_times>1, acc") #TODO
         special_params=["use_in_model_da_times","ce_loss_weight","pair_loss_weight","sent_loss_weight"]
+        # optionとして、ce_use_embs,sent_only_use_clsも存在。
         for s_p in special_params:
             if s_p not in args.keys():
                 raise Exception(f"you need args '{s_p}' for MSCL")
@@ -249,7 +270,7 @@ def train(train_file_path:str,output_dir:str,arch:str,
         use_da_times=args["use_in_model_da_times"] # 必須
         ce_use_emb=args.get("ce_use_embs",False)
         sent_only_use_cls=args.get("sent_only_use_cls",False)
-        model=MSCL(pretrained_model_name_or_path,logger=logger,jlbert_token=jlbert_token,is_ph_same_instance=True,use_da_times=use_da_times,tau=0.08,ce_use_emb=False,sent_only_use_cls=False).to(device)
+        model=MSCL(pretrained_model_name_or_path,logger=logger,jlbert_token=jlbert_token,is_ph_same_instance=True,use_da_times=use_da_times,tau=0.08,ce_use_emb=ce_use_emb,sent_only_use_cls=sent_only_use_cls).to(device)
         optimizer=torch.optim.Adam(model.parameters(), lr=lr) # , betas=(1-beta1,1-beta2),eps=eps,weight_decay=decay
         def accuracy(logits:torch.Tensor,gold:torch.Tensor):
             b=len(gold) # logits (b*? , 2)
@@ -270,32 +291,42 @@ def train(train_file_path:str,output_dir:str,arch:str,
                 # TODO accuracy は 増やした方が良い??? TODO accuracyの関数を渡す。
         metrics={"CE":accuracy}) # 拡張データではやらない。(DAはDropoutなのでevalでは使われなさそう)つまり、一つ分。
     elif arch=="DACL":
-        raise Exception(f"not implemented arch {arch}")
-        # x_train, x_val, y_train, y_val x_test, y_test 
-        train_dataloader="" # TODO IMPLEMNT
-        valid_dataloader="" # TODO IMPLEMNT
+        # raise Exception(f"not implemented arch {arch}")
+        special_params=["use_in_model_da_times","pseudo_neg","ce_loss_weight","cl_loss_weight"]
+        for s_p in special_params:
+            if s_p not in args.keys():
+                raise Exception(f"you need args '{s_p}' for MSCL")
+        converter = lambda x,y:convert_examples_to_features(x,y,max_seq_length=max_len,tokenizer=tokenizer)
+        use_da_times=args["use_in_model_da_times"] # 必須
+        pseudo_neg=args["pseudo_neg"]
+        model =DACL(pretrained_model_name_or_path,converter=converter,logger=logger,jlbert_token=jlbert_token,use_da_times=use_da_times,pseudo_neg=pseudo_neg,tau=0.08).to(device) # TODO
+        data=TextDataset(x_train,y_train)
+        train_dataloader=DataLoader(data,batch_size,collate_fn=model.dataloader_collate_fn,shuffle=True)
+        data=TextDataset(x_val,y_val)
+        valid_dataloader=DataLoader(data,batch_size,collate_fn=model.dataloader_collate_fn,shuffle=True)
+
         if test_path:
-            test_dataloader="" # TODO IMPLEMNT
-        model =create_model(pretrained_model_name_or_path,use_da=settings["use_da"],use_cl=settings["use_cl"]) # TODO
+            data=TextDataset(x_test,y_test)
+            test_dataloader=DataLoader(data,batch_size,collate_fn=model.dataloader_collate_fn,shuffle=False)
         optimizer=torch.optim.Adam(model.parameters(), lr=lr) # , betas=(1-beta1,1-beta2),eps=eps,weight_decay=decay
         model.compile(
             optimizer=optimizer,
             loss={
-                "CE":model.LossCE,
-                "CL":model.LossCL,
+                "CE":model.CE_Loss,
+                "CL":model.CL_Pair_Loss,
                 },
             loss_weights={
-                "CE":settings["CELossWeight"],
-                "CL":settings["CLLossWeight"],
+                "CE":args["ce_loss_weight"],
+                "CL":args["cl_loss_weight"],
                 },
-            metrics={"CE":"sparse_categorical_accuracy"}
+            metrics={"CE":model.accuracy}
         )
     else:
         raise Exception(f"not implemented arch {arch}")
 
 
     monitor_loss=model.fit(train_dataloader,valid_dataloader,epochs=epochs,output_dir=output_dir,nep=nep,
-                    save_monitor="CE",device=device,nep_base_namespace=nep_base_namespace)
+                    save_monitor="CE",device=device,nep_base_namespace=nep_base_namespace,reset=reset)
 
     model.load_weights(os.path.join(output_dir,"model.pth")) #  'BERT_Task4.h5'
 
@@ -396,6 +427,19 @@ def MSCL_train_test(seed):
     sent_loss_weight=0.0
     )
 
+def DACL_train_test():
+    seed=0
+    train(
+        train_file_path="/work/source/data/coliee/tsv/riteval_H18_jp.tsv",
+        output_dir="/work/source/ColieePytorchFramework/results/DACL_tohoku-bert_NA_debug",
+        arch="DACL",
+        seed=seed,
+        use_in_model_da_times=2,# 2も試す
+        pseudo_neg=2, # 1,2も試す
+        ce_loss_weight=1.0,
+        cl_loss_weight=0.0, # 0以上も試す
+    )
+
 def MSCL_Details_Test(bert_in,bert_model=None):
     if bert_model==None:
         from transformers import BertConfig,BertModel
@@ -435,13 +479,14 @@ if __name__ == '__main__':
     # train_debug()
     # controller_debug()
 
-    # args=get_controller_args()
-    # args=vars(args) # 辞書に変換
-    # controller(**args)
+    args=get_controller_args()
+    args=vars(args) # 辞書に変換
+    controller(**args)
 
     # do_debut_test():
 
-    args=str2dict_args_from_sh()
-    controller(args)
+    # args=str2dict_args_from_sh()
+    # controller(args)
 
+    # DACL_train_test()
 

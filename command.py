@@ -115,13 +115,18 @@ def do_experiment_all_year_from_shell(write_only=False):
     argparser.add_argument('--ce_use_emb',action="store_true") # デフォルトはFalse
     argparser.add_argument('--sent_only_use_cls',action="store_true") # デフォルトはFalse
 
+    argparser.add_argument('--cl_loss_weight',type=float,default=None)
+    argparser.add_argument('--pseudo_neg',type=int,default=None)
+
     args=argparser.parse_args()
     args=vars(args) # args を辞書に変換
     args.pop("execute_mode")
+    temp={k:v for k,v in args.items()}
     for k,v in args.items():
         if v==None:
             print(f"Debug pop args {k}")
-            args.pop(k)
+            temp.pop(k)
+    args=temp
     experiment_all_year(write_only=write_only,**args)
 
 def experiment_all_year(write_only,base_dir,meta_name,architecture,model_path,augmentation_flag=False,loop_time=5,model_remove=False,neptune_tags=[],debug=False,without_neptune=False,use_model_iter=False,**args):

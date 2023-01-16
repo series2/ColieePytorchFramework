@@ -36,7 +36,7 @@ class TrainingModelBase(nn.Module):
         self.loss_fns:dict=loss # {"loss_name",loss(gold,pred)}
         self.loss_weights:dict=loss_weights if loss_weights!=None else {key:1.0/len(loss.keys()) for key in loss.keys()}
         self.metrics_fns:dict=metrics
-    def fit(self,train_dataloader,valid_dataloader,epochs,output_dir,nep:neptune.metadata_containers.Run=None,nep_base_namespace="",save_best_only=True,save_monitor="",device=torch.device('cpu')):
+    def fit(self,train_dataloader,valid_dataloader,epochs,output_dir,nep:neptune.metadata_containers.Run=None,nep_base_namespace="",save_best_only=True,save_monitor="",device=torch.device('cpu'),reset=False):
         """
             neptuneには、_loss または _accがkeyの語尾に接続される。
             save_best_only は、save_monitorを基準にして、最高の値が出た時に上書きする。
@@ -74,6 +74,7 @@ class TrainingModelBase(nn.Module):
                     y=y.to(device)
 
                     # Compute prediction error
+                    # self.logger.warning(X)
                     out = self(**X) # return dict_output
                     for key,loss_fn in self.loss_fns.items():
                         # self.logger.debug(out[key])
@@ -106,10 +107,11 @@ class TrainingModelBase(nn.Module):
                         dataloader_with_progress_bar.set_postfix(od)
             # with torch.no_grad(): itemでnumpyなどに変換しているので、不要
             assert size>0
+            # assert count==size, f"{count},{size}" # 内部で拡張がある場合、size = len(dataloader.dataset)より大きくなる。
             for key in self.loss_fns.keys():
-                log_loss_dict[key]/=size
+                log_loss_dict[key]/=count
             for key,metrics_fn in self.metrics_fns.items():
-                log_acc_dict[key]/=size
+                log_acc_dict[key]/=count
             del out
             del loss
             return log_loss_dict,log_acc_dict
@@ -146,9 +148,9 @@ class TrainingModelBase(nn.Module):
                         dataloader_with_progress_bar.set_postfix(od)
             assert size>0
             for key in self.loss_fns.keys():
-                log_loss_dict[key]/=size
+                log_loss_dict[key]/=count
             for key,metrics_fn in self.metrics_fns.items():
-                log_acc_dict[key]/=size
+                log_acc_dict[key]/=count
             return log_loss_dict,log_acc_dict
         
         monitor_loss=sys.float_info.max # 注意 epoch などは 0スタートであり、保存したモデルを途中から始めることを想定しない。
@@ -161,24 +163,35 @@ class TrainingModelBase(nn.Module):
                 model_path=os.path.join(output_dir,"model.pth") #  'BERT_Task4.h5'
                 torch.save(self.state_dict(), model_path)
                 self.logger.info(f"Saved PyTorch Model State to {model_path}")
-
             if nep!=None:
                 train_loss=0
                 for key in log_train_loss.keys():
                     train_loss+=self.loss_weights[key] * log_train_loss[key]
+                if t==0 and reset:
+                    nep[os.path.join(nep_base_namespace,"train/epoch","loss")].pop()
                 nep[os.path.join(nep_base_namespace,"train/epoch","loss")].log(train_loss)
                 val_loss=0
                 for key in log_valid_loss.keys():
                     val_loss+=self.loss_weights[key] * log_valid_loss[key]
+                if t==0 and reset:
+                    nep[os.path.join(nep_base_namespace,"validation/epoch","loss")].pop()
                 nep[os.path.join(nep_base_namespace,"validation/epoch","loss")].log(val_loss)
 
                 for key,value in log_train_loss.items():
+                    if t==0 and reset:
+                        nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_loss")].pop()
                     nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_loss")].log(value)
                 for key,value in log_train_acc.items():
+                    if t==0 and reset:
+                        nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_acc")].pop()
                     nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_acc")].log(value)
                 for key,value in log_valid_loss.items():
+                    if t==0 and reset:
+                        nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_loss")].pop()
                     nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_loss")].log(value)
                 for key,value in log_valid_acc.items():
+                    if t==0 and reset:
+                        nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_acc")].pop()
                     nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_acc")].log(value)
         if nep!=None:
             nep[os.path.join(nep_base_namespace,"fit_params/epochs")]=epochs
@@ -230,6 +243,7 @@ class TrainingModelBase(nn.Module):
 
         out=self.predict(test_dataloader,device)
         logit=out[use_key]
+        # print(len(test_x),len(test_y),logit.shape)
         certainty_factor = nn.functional.softmax(logit,dim=1)[:, 1].detach().cpu().numpy()
         # prediction = np.argmax(logit, axis=1)
         prediction=torch.argmax(logit,dim=1).detach().cpu().numpy()
@@ -248,6 +262,7 @@ class TrainingModelBase(nn.Module):
         if nep!=None:
             nep[os.path.join(nep_base_namespace,"test/report")]=report_df
             nep[os.path.join(nep_base_namespace,"test/acc")]=report['accuracy']
+        return report['accuracy']
 
 
 def test_DataSet_DataLoader(dataloader,logger,trim=3):

@@ -6,18 +6,18 @@ from torch.nn.utils.rnn import pad_sequence,pack_sequence,pad_packed_sequence
 import torch
 
 
-
 def convert_examples_to_features(x, y,
                                  max_seq_length,
                                  tokenizer,
                                  jlbert_tokenizer=None,
                                  debug=False):
+    # x shape ... ((p_0,h_0),(p_1,h_1),...)
     y=torch.tensor(y, dtype=torch.long)
     features = {
         'input_ids': [],
         'attention_mask': [],
         'token_type_ids': [],
-        'labels': y
+        # 'labels': y
     }
     for pairs in x:
         tokens = [tokenizer.cls_token]
@@ -139,6 +139,7 @@ def convert_examples_to_multi_bert_features(x, y,
     #print("\n\nmulti converter")
     #print(y)
     return x, y
+
 
 
 # def convert_examples_to_multi_bert_features(x, y,

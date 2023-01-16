@@ -2,12 +2,13 @@ import torch
 from torch import nn
 from torch.utils import data
 import neptune.new as neptune
-# import numpy as np
 
 from utils import create_logger,create_neptune_run_instance
 from logging import Logger
 from base_model import TrainingModelBase,test_DataSet_DataLoader
 from transformers import BertConfig, BertForSequenceClassification,BertModel
+import random
+from sklearn.metrics import accuracy_score
 """
 check TODO
 check Attention
@@ -18,12 +19,22 @@ class SimpleDataset(data.Dataset):
     # 入るデータx,yはすでにtensorになっているとする。
     # to(device)はforwardの責務。
     def __init__(self,x,y): 
-        self.X=x
+        self.X=x # text 配列
         self.Y=y
     def __getitem__(self,index):
         return {key:self.X[key][index] for key in self.X.keys()} ,self.Y[index]
     def __len__(self):
-        return len(self.Y) # xはdictなので、keyの数を返してしまう。
+        return len(self.Y)
+    
+class TextDataset(data.Dataset):
+    # for DACL model
+    def __init__(self,x,y): 
+        self.X=x # xはペア
+        self.Y=y
+    def __getitem__(self,index):
+        return {"text_p":self.X[index][0],"text_h":self.X[index][1]} ,self.Y[index]
+    def __len__(self):
+        return len(self.Y)
 
 
 class PairDataset(data.Dataset):
@@ -90,17 +101,20 @@ class PlainBert(TrainingModelBase):
 class MSCL(TrainingModelBase):
     def __init__(self,pretrained_model_name_or_path,logger:Logger=None,jlbert_token=None,is_ph_same_instance=True,use_da_times=1,tau=0.08,ce_use_emb=False,sent_only_use_cls=False):
         super().__init__(logger=logger)
-        self.bert_config=BertConfig.from_pretrained(pretrained_model_name_or_path,
+        self.logger.warning("config pretraied_model_name_or_path has not been implemented.if you want to separate path between config and model,write code directory here.")
+        config_path="cl-tohoku/bert-base-japanese-whole-word-masking" if ("JLBERT" not in pretrained_model_name_or_path) else pretrained_model_name_or_path
+        self.bert_config=BertConfig.from_pretrained(config_path,
                                                     gradient=True,
                                                     # num_labels=2,使わないので。
                                                     use_auth_token=jlbert_token
                                                     )
+        print(pretrained_model_name_or_path)
         self.bert_p=BertModel.from_pretrained(pretrained_model_name_or_path,config=self.bert_config,use_auth_token=jlbert_token)
         self.bert_h=BertModel.from_pretrained(pretrained_model_name_or_path,config=self.bert_config,use_auth_token=jlbert_token) if not is_ph_same_instance else self.bert_p
 
         num_heads=12 # BERT内部のAttentionと同じサイズ
         self.attention=nn.MultiheadAttention(embed_dim=self.bert_config.hidden_size,num_heads=num_heads,batch_first=True) # out (B,L,D) when batch_first=True
-        logger.warning(f"It use cross attention from torch.nn.MultiheadAttention.this is not different from original MSCL. And this model use num_heads={num_heads}") # add_bias_kvなどはない。 
+        self.logger.warning(f"It use cross attention from torch.nn.MultiheadAttention.this is not different from original MSCL. And this model use num_heads={num_heads}") # add_bias_kvなどはない。 
         
         self.ff = nn.Sequential(
             nn.Linear(4*self.bert_config.hidden_size, self.bert_config.hidden_size),
@@ -300,21 +314,129 @@ class MSCL(TrainingModelBase):
         return loss
 
 class DACL(TrainingModelBase):
-    def __init__(self,pretrained_model_name_or_path,logger:Logger=None,jlbert_token=None,use_da_times=1,tau=0.08):
+    # 実は対照学習のロスは多値分類の中でも2値など低次元にはうまく挙動しない可能性がある。というのも、対照学習のイメージは、高次元空間において同じものの特徴を近づけ、異なるものを遠ざける目的がある。
+    # 今回の場合、角度が遠ざかる形となる。
+
+    # コピらにおいて、対照学習による学習がうまくいっていたのはなぜか???
+    def __init__(self,pretrained_model_name_or_path,converter,logger:Logger=None,jlbert_token=None,use_da_times=1,pseudo_neg=0,tau=0.08):# pseudo_negは使うなら2以下を推奨
         super().__init__(logger=logger)
-        self.bert_config=BertConfig.from_pretrained(pretrained_model_name_or_path,
+        bert_config=BertConfig.from_pretrained(pretrained_model_name_or_path,
                                                     gradient=True,
                                                     num_labels=2,
                                                     use_auth_token=jlbert_token
                                                     )
-        self.bert=BertModel.from_pretrained(pretrained_model_name_or_path,config=bert_config,use_auth_token=jlbert_token)
+        self.bert=BertForSequenceClassification.from_pretrained(pretrained_model_name_or_path,config=bert_config,use_auth_token=jlbert_token)
 
         self.ce=nn.CrossEntropyLoss()
-        self.cos_sim = nn.CosineSimilarity(dim=1)
+        # self.cos_sim = nn.CosineSimilarity(dim=1)
+        self.logger.warning("CL_Pair_Loss use dot_similarity (instead of cosine similarity)")
+        self.converter = converter # batchの中でtokenizerを使用する
+        self.pseudo_neg = pseudo_neg # 擬似負例の数。最大でbatch_size(negativeの数)。i番め以外から最大pseudo_neg選ぶ。
+        self.use_da_times = use_da_times # 全体でのデータ拡張倍率
+        self.tau=tau
+        # 元のbatch_sizeをbとすると、全体では (b+#neg_label * pseudo_neg) * use_da_times となる。
+        # これは想定しているものはおよそ (12+ 6(max 11) *2) * 2 = 48(max 68) となる。
+        # 簡単のためデータ拡張をした場合の擬似負例についても、hypothesis_iに対応する選択は変更しない方法もあるが、毎回変更する。
+        # するとfor文について、batch*batchが発生する。
+        self.now_batch_size=-1
     
-    def forward(self,id_p,att_p,typ_p,id_h,att_h,typ_h,labels,**other):
-        pass
+    def dataloader_collate_fn(self,batch):
+        # text_p,text_h.... stringの配列 # labels .... ラベルの配列
+        # labels_iが1のtext_h_iに対しては、premise は text_p_iのみ。
+        # labels_iが0のtext_h_iに対しては、premise は 任意のtext_p_j。これは、text_p_i及びランダムなn子を使う。
+        # 今は面倒なのでfor文で回す。
+        # batch ... [[{"text_p":"premise","text_h":"hypothesis"},1],[{"text_p":"premise2","text_h":"hypothesis2"},0]] # Attention Xのlabel項目は廃止する。
+        X,Y=list(zip(*batch)) # X ... ({'text_p': 'premise', 'text_h': 'hypothesis'}, {'text_p': 'premise2', 'text_h': 'hypothesis2'}) , Y ... (1, 0)
+        if len(X)<1:
+            raise Exception("No Element")
+        self.now_batch_size=len(Y)
+        d={key:[] for key in X[0].keys()}
+        for di in X:
+            for key in di:
+                d[key].append(di[key])
+        # d ... {'text_p': ['premise', 'premise2'], 'text_h': ['hypothesis', 'hypothesis2']}
 
+        text_p=d["text_p"];text_h=d["text_h"];labels=Y
+        # 拡張
+        b=len(labels)
+        pseudo_neg=min(self.pseudo_neg,b-1)
+        p=[];h=[];l=[]
+
+        # ここからループ
+        times=self.use_da_times if self.training else 1
+        for _ in range(times):
+            p.extend(text_p);h.extend(text_h);l.extend(labels)
+            for i,label in enumerate(labels):
+                if label==0:
+                    # i番め以外の任意のデータからnegを選択
+                    choices=random.sample(range(b-1),pseudo_neg)
+                    choices=map(lambda x:x if x<i else x+1,choices)
+                    for j in choices:
+                        p.append(text_p[j]);h.append(text_h[i]);l.append(0)
+        x=list(zip(p,h))
+        return self.converter(x,l)# {"input_ids":[["あるp,hのsepで区切ったやつのid配列"],["別のp,hのsepで区切ったやつ"],...],"attention_mask":[[]],"token_typ":[[]]}, [0,1,1,...]# paddingの上、tensorへ変換済み
+    def forward(self,input_ids,attention_mask,token_type_ids):
+        out=self.bert(**{"input_ids":input_ids,"attention_mask":attention_mask,"token_type_ids":token_type_ids},output_hidden_states=True)
+        last_hidden_states=out.hidden_states[-1]
+        ce=out.logits # 線形層のあとを使う。
+        ce=ce[:self.now_batch_size]
+        cl=last_hidden_states[:,0,:]
+        return {"CE":ce,"CL":cl}
+    
+    def CE_Loss(self,pred,gold):
+        # len(last_hidden_states)= (true_batch+#neg_label * pseudo_neg) * use_da_times
+        b=self.now_batch_size # ここ、擬似負例や、拡張ゴールドなどは使用しない。 
+        gold=gold[:b]
+        # pred=pred[:b]
+        loss=self.ce(pred,gold)
+        assert not torch.isnan(loss).any(),f"{pred} ,\n{gold}"
+        return loss
+    
+    def CL_Pair_Loss(self,pred,gold):
+        # pred ...  (b,768)
+        """
+        バッチ内部i番目についてgoldラベルの同じ全てのj(!=i)について、pred_iとpred_jでsimをとる。
+        """
+        eps=1e-10 # logのinf回避のための微小定数
+
+        
+        # pred shape ...(b*use_da_times,4*d) 
+        # 類似度行列の次元は (b*use_da_times)**2なので大したことはない。
+        # 類似度は論文では exp(dot(Zi,Zj)/tau) と cos_sim(Zi,Zj)/tau がある。Pair_SCEに合わせ、ここではdot内積を採用。
+        matrix=torch.matmul(pred,pred.T)/self.tau 
+        # self.logger.warning(f"check pair loss matrix shape {matrix.shape},{self.now_batch_size}")
+        # 注意 自分自身の内積も計算する。もしそれを省きたいなら、対角成分の計算グラフを切れば良い。また、類似度を負の無限大にすれば、expを撮った時0になる。
+        softmax_matrix=torch.nn.functional.softmax(matrix,dim=1)
+        # batch_iに対して、gold[i]と同じであるgold[j]のみ足し算する。
+        # 例えば、i番目が(2,5,6,3)に対して 1,3番目を使いたいなら、dot((2,5,6,3),(True,False,True,False))/sum(True,False,True,False)=(2+6)/2 となる。
+
+        tf=gold.unsqueeze(dim=0)==gold.unsqueeze(dim=1)  # shape ... matrix
+        p=torch.sum(tf,dim=1,keepdim=True) # shape (b,1) # batch iと同じラベルがTrueになっている。自分自身を省いていないので1以上になるはず。
+        assert torch.sum(p>0) ==len(p) ,f"{len(p)} , {torch.sum(p>0)},{p>0},{p}"
+
+        
+        
+        li=-torch.log(torch.sum(softmax_matrix*tf,dim=1,keepdim=True)/p+eps) # shape (b,1)
+        # loss=torch.sum(li)
+        loss=torch.mean(li)
+        assert not torch.isnan(loss).any()
+        return loss
+    
+    def accuracy(self,logits:torch.Tensor,gold:torch.Tensor):
+        b=self.now_batch_size
+        logits=logits[:b]
+        gold=gold[:b]
+        prediction=torch.argmax(logits,dim=1)
+        acc=accuracy_score(gold.detach().cpu().numpy(), prediction.detach().cpu().numpy())
+        assert 0<= acc <= 1 ,self.logger.warning(f"{gold},{prediction}")
+        return acc
+        
+
+        
+            
+
+                
+                
 def plain_test():
     # DEBUG
 

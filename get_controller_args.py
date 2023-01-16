@@ -40,11 +40,21 @@ def get_controller_args(func=None):
     argparser.add_argument('--batch_size',type=int)
     argparser.add_argument('--epochs',type=int)
     argparser.add_argument('--max_len',type=int)
-    argparser.add_argument('--lr',type=float)
+    argparser.add_argument('--lr',type=float,default=1e-5)
     argparser.add_argument('--without_neptune',action="store_true") # デフォルトFalse
     argparser.add_argument('--neptune_init_tags',nargs="*") # 空白で複数
+    argparser.add_argument('--reuse_nep',action="store_true") # デフォルトFalse
     argparser.add_argument('--jlbert_token',type=str) # JL Bertを使う時、access tokenをセットする。この時、tokenizerはBertTokenizerを使用する。 # old lic_token
     argparser.add_argument('--debug',action="store_true") # デフォルトFalse # データセットが小さくなり(未実装)、epochが1になる。
+    argparser.add_argument('--reset',action="store_true") # デフォルトFalse
+
+    argparser.add_argument('--use_in_model_da_times',type=int) # for MSCL , DACL
+    argparser.add_argument('--ce_loss_weight',type=float) # for MSCL , DACL
+    argparser.add_argument('--pair_loss_weight',type=float) # for MSCL
+    argparser.add_argument('--sent_loss_weight',type=float) # for MSCL
+    argparser.add_argument('--cl_loss_weight',type=float) # for DACL
+    argparser.add_argument('--pseudo_neg',type=int) # for DACL
+
     if func:
         func(argparser)
     return argparser.parse_args()
@@ -52,4 +62,5 @@ def get_controller_args(func=None):
 def str2dict_args_from_sh():
     #　第一引数は文字列の辞書である。つまり、 python test.py '{"start": "2004-1-10", "end": "2004-8-31"}' のような感じ。
     argvs = json.loads(sys.argv[1])
+    print(argvs)
     return argvs
