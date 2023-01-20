@@ -27,10 +27,11 @@ def controller(train_file_path:str,arch:str,
         name,base_dir:str="./",
         loop_time:int=1,use_model_iter:bool=False,model_remove:bool=False,
         pretrained_model_name_or_path:str="cl-tohoku/bert-base-japanese-whole-word-masking",
-        test_path:str=None,aug_path:str=None,
+        test_path:str=None,aug_path:str=None,valid_path:str=None,
         batch_size:int=None,epochs:int=None,max_len:int=None,lr:float=1e-5,
         without_neptune=False,neptune_instance=None,neptune_init_tags=[],reuse_nep=False, #reuse_nep ... idがあれば使う。
         jlbert_token:str=None,debug:bool=False,logger=None,reset=False,**args): # argsにはモデル固有のパラメタを入れる。
+        # resetはエラーが起きるなどして再度学習をやり直したいときに使用する。
         ## argsの中身　use_in_model_da_times, (CELossWeight,PairLossWeight,SentLossWeight)
     """ 
     ある一年分の学習を1回または複数回回す。(loop_time)
@@ -117,6 +118,7 @@ def controller(train_file_path:str,arch:str,
                 "model_remove":model_remove,
                 "pretrained_model_name_or_path":pretrained_model_name_or_path,
                 "test_path":test_path,
+                "valid_path":valid_path,
                 "aug_path":aug_path,
                 "augmentation":(aug_path!=None),
                 "batch_size":batch_size,
@@ -139,7 +141,7 @@ def controller(train_file_path:str,arch:str,
         nep_base_namespace=name
         train(train_file_path=train_file_path,output_dir=output_dir,arch=arch,
             pretrained_model_name_or_path=pretrained_model_name_or_path,
-            test_path=test_path,aug_path=aug_path,
+            test_path=test_path,aug_path=aug_path,valid_path=valid_path,
             batch_size=batch_size,epochs=epochs,max_len=max_len,lr=lr,
             nep=neptune_instance,nep_base_namespace=nep_base_namespace,
             jlbert_token=jlbert_token,debug=debug,logger=logger,reset=reset,**args)
@@ -154,7 +156,7 @@ def controller(train_file_path:str,arch:str,
             nep_base_namespace=os.path.join(name,str(i))
             train(train_file_path=train_file_path,output_dir=output_dir,arch=arch,
                 pretrained_model_name_or_path=pretrained_model_name_or_path,
-                test_path=test_path,aug_path=aug_path,
+                test_path=test_path,aug_path=aug_path,valid_path=valid_path,
                 batch_size=batch_size,epochs=epochs,max_len=max_len,lr=lr,
                 nep=neptune_instance,nep_base_namespace=nep_base_namespace,
                 jlbert_token=jlbert_token,debug=debug,logger=logger,reset=reset,**args)
