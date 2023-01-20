@@ -168,30 +168,48 @@ class TrainingModelBase(nn.Module):
                 for key in log_train_loss.keys():
                     train_loss+=self.loss_weights[key] * log_train_loss[key]
                 if t==0 and reset:
-                    nep[os.path.join(nep_base_namespace,"train/epoch","loss")].pop()
+                    try:
+                        nep[os.path.join(nep_base_namespace,"train/epoch","loss")].pop()
+                    except:
+                        pass
                 nep[os.path.join(nep_base_namespace,"train/epoch","loss")].log(train_loss)
                 val_loss=0
                 for key in log_valid_loss.keys():
                     val_loss+=self.loss_weights[key] * log_valid_loss[key]
                 if t==0 and reset:
-                    nep[os.path.join(nep_base_namespace,"validation/epoch","loss")].pop()
+                    try:
+                        nep[os.path.join(nep_base_namespace,"validation/epoch","loss")].pop()
+                    except:
+                        pass
                 nep[os.path.join(nep_base_namespace,"validation/epoch","loss")].log(val_loss)
 
                 for key,value in log_train_loss.items():
                     if t==0 and reset:
-                        nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_loss")].pop()
+                        try:
+                            nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_loss")].pop()
+                        except:
+                            pass
                     nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_loss")].log(value)
                 for key,value in log_train_acc.items():
                     if t==0 and reset:
-                        nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_acc")].pop()
+                        try:
+                            nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_acc")].pop()
+                        except:
+                            pass
                     nep[os.path.join(nep_base_namespace,"train/epoch",f"{key}_acc")].log(value)
                 for key,value in log_valid_loss.items():
                     if t==0 and reset:
-                        nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_loss")].pop()
+                        try:
+                            nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_loss")].pop()
+                        except:
+                            pass
                     nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_loss")].log(value)
                 for key,value in log_valid_acc.items():
                     if t==0 and reset:
-                        nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_acc")].pop()
+                        try:
+                            nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_acc")].pop()
+                        except:
+                            pass
                     nep[os.path.join(nep_base_namespace,"validation/epoch",f"{key}_acc")].log(value)
         if nep!=None:
             nep[os.path.join(nep_base_namespace,"fit_params/epochs")]=epochs
