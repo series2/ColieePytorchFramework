@@ -109,6 +109,7 @@ class MSCL(TrainingModelBase):
                                                     use_auth_token=jlbert_token
                                                     )
         print(pretrained_model_name_or_path)
+        # TODO same instance は BERT　エンコーダに対してのみ。Cross Attentionは現時点では共有している。
         self.bert_p=BertModel.from_pretrained(pretrained_model_name_or_path,config=self.bert_config,use_auth_token=jlbert_token)
         self.bert_h=BertModel.from_pretrained(pretrained_model_name_or_path,config=self.bert_config,use_auth_token=jlbert_token) if not is_ph_same_instance else self.bert_p
 
@@ -247,11 +248,13 @@ class MSCL(TrainingModelBase):
         
         
         li=-torch.log(torch.sum(softmax_matrix*tf,dim=1,keepdim=True)/p+eps) # shape (b,1)
-        loss=torch.sum(li)
+        # loss=torch.sum(li)
+        loss=torch.mean(li)
         assert not torch.isnan(loss).any()
+        assert not torch.isinf(loss).any()
         return loss
     
-    def SCL_Sent_Loss(self,pred,gold):
+    def OLD_SCL_Sent_Loss(self,pred,gold):
         """
         leepは同じデータ拡張元を表す幅とする。
         バッチ内部i番目についてそれがTrueの時、Hiに対してPi及びP(i+leep)を正例とし、負例は存在しない。
@@ -274,7 +277,7 @@ class MSCL(TrainingModelBase):
         # Sp,Sh shape ... (b,lp,d), (b,lh,d)
         self.logger.debug(f"{Sp.shape},{Sh.shape}")
         self.logger.debug(f"{b_da},{Sp.reshape((b_da,-1)).shape},{torch.reshape(Sp,(b_da,-1)).shape}")
-        cossim_matrix=self.cos_sim(Sp.reshape((b_da,-1)).unsqueeze(1),Sh.reshape((b_da,-1)).unsqueeze(0))
+        cossim_matrix=self.cos_sim(Sp.reshape((b_da,-1)).unsqueeze(1),Sh.reshape((b_da,-1)).unsqueeze(0))/self.tau 
 
         assert cossim_matrix.shape==(b_da,b_da),f"wrong shape : {cossim_matrix.shape},{b},{self.use_da_times},{b_da},{self.training}"
 
@@ -312,6 +315,61 @@ class MSCL(TrainingModelBase):
         self.logger.debug(f"Sent_loss:{loss} , temp:{temp} , poss:{poss_rate}({poss}/{pos_n} , neg:{negs_rate}({negs}/{neg_n})")
         assert not torch.isnan(loss).any()
         return loss
+
+    def SCL_Sent_Loss(self,pred,gold):
+        """
+        leepは同じデータ拡張元を表す幅とする。
+        バッチ内部i番目についてそれがTrueの時、Hiに対してPi及びP(i+leep)を正例とし、負例は存在しない。
+        バッチ内部i番目について、それがFalseの時、Hiに対してPi及び(Pi+leep)、さらにはそれ以外の任意のデータを負例とし、正例は存在しない。
+        なお、i番目がT/Fかはバッジによって変化するので、一般にロスは安定しなさそうである。
+        一つ安定化手法で思いついたのは、 Trueのものについての cosine similarityは[-1-1]であるものがn子でありそれをTrueの数で割る。この値は大きくしたい。
+        同様にしてFalseもそうする。この値は引き算したい。
+        それぞれ正規化した後で max( True-False +1,0 ) とする。 1としたのは、True-Falseの最大値が2、最小値が-2であり、+側の半分を取った。
+        これ良さそう。なのでそれで実装する。
+        """
+        eps=1e-10 # logのinf回避のための微小定数
+        b=len(gold)
+        l=pred.shape[1]//2
+        Sp,Sh=pred[:,:l,:],pred[:,l:,:]
+        b_da=b if not self.training else b*self.use_da_times
+        assert Sp.shape[0]==b_da,f"SP:{Sp.shape},{b},{self.use_da_times},{b_da},{self.training}"
+            
+        if self.training:
+            gold=gold.repeat(self.use_da_times)
+        # Sp,Sh shape ... (b,lp,d), (b,lh,d)
+        self.logger.debug(f"{Sp.shape},{Sh.shape}")
+        self.logger.debug(f"{b_da},{Sp.reshape((b_da,-1)).shape},{torch.reshape(Sp,(b_da,-1)).shape}")
+        cossim_matrix=self.cos_sim(Sp.reshape((b_da,-1)).unsqueeze(1),Sh.reshape((b_da,-1)).unsqueeze(0))
+
+        assert cossim_matrix.shape==(b_da,b_da),f"wrong shape : {cossim_matrix.shape},{b},{self.use_da_times},{b_da},{self.training}"
+
+        softmax_matrix=torch.nn.functional.softmax(cossim_matrix,dim=1)
+
+        gold_filter=torch.unsqueeze((gold==1),dim=0) # gold_filter shape (1,b_da) . content True/False
+        p=torch.sum(gold_filter)
+
+
+        leap_filter=torch.eye(b).to(gold.device) # todo
+        if self.training:
+            leap_filter=leap_filter.repeat(self.use_da_times,self.use_da_times)
+        poss_filter=leap_filter*gold_filter # shape (b,b)
+        
+
+
+        if p==0:
+            return torch.zeros_like(p) # 0を deviceを揃えて戻す
+        # softmax_matrix*gold_filter ... Falseの盾一列を0 onlyにしている
+        # torch.sum(softmax_matrix*gold_filter,dim=1,keepdim=False) ... shape (b_da)
+        
+        pos_num=self.use_da_times
+        li=-torch.log(torch.sum(softmax_matrix*poss_filter,dim=1,keepdim=False)/pos_num + eps) # 何もない時は0
+
+        loss=torch.sum(li*gold_filter) # なぜかわからないが li*gold_filter の要素がstep　ごとに　ほぼ同じ値を取る。
+        loss/=p  # Cross Entropy のreducition default mean に合わせて
+        assert not torch.isnan(loss).any() , f"{p},{li},{gold_filter},{li*gold_filter}"
+        assert not torch.isinf(loss).any() , f"{p},{li},{gold_filter},{li*gold_filter}"
+        return loss
+
 
 class DACL(TrainingModelBase):
     # 実は対照学習のロスは多値分類の中でも2値など低次元にはうまく挙動しない可能性がある。というのも、対照学習のイメージは、高次元空間において同じものの特徴を近づけ、異なるものを遠ざける目的がある。
