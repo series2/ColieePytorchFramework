@@ -37,6 +37,7 @@ def get_controller_args(func=None):
     argparser.add_argument('--pretrained_model_or_path',type=str)
     argparser.add_argument('--test_path', type=str)
     argparser.add_argument('--aug_path', type=str)
+    argparser.add_argument('--valid_path', type=str)
     argparser.add_argument('--batch_size',type=int)
     argparser.add_argument('--epochs',type=int)
     argparser.add_argument('--max_len',type=int)
